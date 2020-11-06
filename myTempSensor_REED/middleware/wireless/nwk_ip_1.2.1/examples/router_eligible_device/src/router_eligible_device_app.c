@@ -39,6 +39,7 @@ Include Files
 /* General Includes */
 #include "EmbeddedTypes.h"
 #include <string.h>
+#include <stdio.h>
 
 /* FSL Framework */
 #include "shell.h"
@@ -149,6 +150,7 @@ static void APP_SendResetToFactoryCommand(void *param);
 static void APP_AutoStart(void *param);
 static void APP_AutoStartCb(void *param);
 #endif
+static void APP_CalcTempCb(void *param);
 
 /*==================================================================================================
 Public global variables declarations
@@ -180,6 +182,10 @@ tmrTimerID_t mAppTimerId = gTmrInvalidTimerID_c;
 #if APP_AUTOSTART
 tmrTimerID_t tmrStartApp = gTmrInvalidTimerID_c;
 #endif
+
+tmrTimerID_t tmrCalcTemp = gTmrInvalidTimerID_c;
+uint32_t temperature;
+bool_t tempGrowing;
 
 uint32_t leaderLedTimestamp = 0;
 
@@ -250,6 +256,17 @@ void APP_Init
             TMR_StartSingleShotTimer(tmrStartApp, jitterTime, APP_AutoStartCb, NULL);
         }
 #endif
+        /* Create a 1 second timer to simulate temperature changing over time */
+        /* It uses the Timers manager driver provided by NXP (Not FreeRtos, see TimersManager.h) */
+        tmrCalcTemp = TMR_AllocateTimer();
+
+        if(tmrCalcTemp != gTmrInvalidTimerID_c)
+        {
+        	temperature = 10;
+        	tempGrowing = TRUE;
+            TMR_StartIntervalTimer(tmrCalcTemp, 1000, APP_CalcTempCb, NULL);
+        }
+
     }
 }
 
@@ -1283,8 +1300,17 @@ static void APP_CoapTempCb
     /* Send CoAP ACK */
     if(gCoapGET_c == pSession->code)
     {
-        /* Get Temperature */
-        pTempString = App_GetTempDataString();
+        /* Allocate 20 bytes for the temperature string */
+        pTempString = MEM_BufferAlloc(20);
+        if(NULL == pTempString)
+        {
+        	/* If it fails allocating the buffer for temperature, then send a hardcoded 0*/
+        	pTempString = (uint8_t*)"0";
+        }
+        else {
+        	sprintf((char*)pTempString, "%d", (int)temperature);
+        }
+
         ackPloadSize = strlen((char*)pTempString);
     }
     /* Do not parse the message if it is duplicated */
@@ -1476,6 +1502,27 @@ static void APP_AutoStartCb
 }
 #endif
 
+/*!*************************************************************************************************
+\private
+\fn     static void APP_CalcTempCb
+\brief  This function simulates a new temperature every second.
+
+\param  [in]    param    Not used
+***************************************************************************************************/
+static void APP_CalcTempCb
+(
+    void *param
+)
+{
+	if(tempGrowing) {
+		temperature++;
+		if(temperature >= 40) tempGrowing = FALSE;
+	}
+	else {
+		temperature--;
+		if(temperature <= 10) tempGrowing = TRUE;
+	}
+}
 /*==================================================================================================
 Private debug functions
 ==================================================================================================*/

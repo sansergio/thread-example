@@ -7,3 +7,5 @@ Thread example for the DSCAE class at ITESO
 
 * __myTempSensor_REED__ folder contains a Router eligible device based project. It simulates a fish tank's temperature sensor connected to a Thread network. Coap properties which can be read/written:
     * /temp - Measured temperature, it is calculated (simulated) every second, the temperature goes from 10C to 40C in 30 seconds and then back to 10C in the same time.
+
+__Note:__ Use the "setdest" command on the Heater's shell to set the Unique local address (ULA) of the temp sensor as the destination address for CoAP commands.

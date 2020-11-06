@@ -39,6 +39,8 @@ Include Files
 /* General Includes */
 #include "EmbeddedTypes.h"
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 /* FSL Framework */
 #include "shell.h"
@@ -99,6 +101,7 @@ Private macros
 #define gAppJoinTimeout_c                       800    /* miliseconds */
 
 #define APP_LED_URI_PATH                        "/led"
+#define APP_SETTEMP_URI_PATH                    "/settemp"
 #define APP_TEMP_URI_PATH                       "/temp"
 #define APP_SINK_URI_PATH                       "/sink"
 #if LARGE_NETWORK
@@ -140,7 +143,7 @@ static void APP_LocalDataSinkRelease(void *pParam);
 static void APP_ProcessLedCmd(uint8_t *pCommand, uint8_t dataLen);
 static void APP_CoapGenericCallback(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_CoapLedCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
-static void APP_CoapTempCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
+static void APP_CoapSetTempCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_CoapSinkCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 static void App_RestoreLeaderLed(void *param);
 #if LARGE_NETWORK
@@ -151,11 +154,15 @@ static void APP_SendResetToFactoryCommand(void *param);
 static void APP_AutoStart(void *param);
 static void APP_AutoStartCb(void *param);
 #endif
+static void APP_GetTempCb(void *param);
+static void APP_SendGetTemp(void *param);
+static void APP_SendGetTempCallback(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 
 /*==================================================================================================
 Public global variables declarations
 ==================================================================================================*/
 const coapUriPath_t gAPP_LED_URI_PATH  = {SizeOfString(APP_LED_URI_PATH), (uint8_t *)APP_LED_URI_PATH};
+const coapUriPath_t gAPP_SETTEMP_URI_PATH = {SizeOfString(APP_SETTEMP_URI_PATH), (uint8_t *)APP_SETTEMP_URI_PATH};
 const coapUriPath_t gAPP_TEMP_URI_PATH = {SizeOfString(APP_TEMP_URI_PATH), (uint8_t *)APP_TEMP_URI_PATH};
 const coapUriPath_t gAPP_SINK_URI_PATH = {SizeOfString(APP_SINK_URI_PATH), (uint8_t *)APP_SINK_URI_PATH};
 #if LARGE_NETWORK
@@ -189,6 +196,14 @@ uint32_t leaderLedTimestamp = 0;
 taskMsgQueue_t *mpAppThreadMsgQueue = NULL;
 
 extern bool_t gEnable802154TxLed;
+
+/* Target temperature */
+uint32_t setTemperature;
+/* Heater state */
+bool_t heaterOn;
+/*Timer to GET the temperature from the Thread temp sensor every 500 ms*/
+tmrTimerID_t tmrGetTemp = gTmrInvalidTimerID_c;
+
 
 /*==================================================================================================
 Public functions
@@ -259,6 +274,13 @@ void APP_Init
             TMR_StartSingleShotTimer(tmrStartApp, jitterTime, APP_AutoStartCb, NULL);
         }
 #endif
+        /* Create a 500ms timer to read the temperature from the temp sensor */
+        /* It uses the Timers manager driver provided by NXP (Not FreeRtos, see TimersManager.h) */
+        tmrGetTemp = TMR_AllocateTimer();
+        /* The heater starts turned Off */
+        heaterOn = FALSE;
+        /* The target temperature starts at 0 */
+        setTemperature = 0;
     }
 }
 
@@ -508,7 +530,7 @@ static void APP_InitCoapDemo
 )
 {
     coapRegCbParams_t cbParams[] =  {{APP_CoapLedCb,  (coapUriPath_t *)&gAPP_LED_URI_PATH},
-                                     {APP_CoapTempCb, (coapUriPath_t *)&gAPP_TEMP_URI_PATH},
+                                     {APP_CoapSetTempCb, (coapUriPath_t *)&gAPP_SETTEMP_URI_PATH},
 #if LARGE_NETWORK
                                      {APP_CoapResetToFactoryDefaultsCb, (coapUriPath_t *)&gAPP_RESET_URI_PATH},
 #endif
@@ -1272,7 +1294,7 @@ static void APP_ProcessLedCmd
 
 /*!*************************************************************************************************
 \private
-\fn     static void APP_CoapTempCb(coapSessionStatus_t sessionStatus, void *pData,
+\fn     static void APP_CoapSetTempCb(coapSessionStatus_t sessionStatus, void *pData,
                                    coapSession_t *pSession, uint32_t dataLen)
 \brief  This function is the callback function for CoAP temperature message.
 \brief  It sends the temperature value in a CoAP ACK message.
@@ -1282,7 +1304,7 @@ static void APP_ProcessLedCmd
 \param  [in]    pSession        Pointer to CoAP session
 \param  [in]    dataLen         Length of CoAP payload
 ***************************************************************************************************/
-static void APP_CoapTempCb
+static void APP_CoapSetTempCb
 (
     coapSessionStatus_t sessionStatus,
     void *pData,
@@ -1296,8 +1318,17 @@ static void APP_CoapTempCb
     /* Send CoAP ACK */
     if(gCoapGET_c == pSession->code)
     {
-        /* Get Temperature */
-        pTempString = App_GetTempDataString();
+        /* Allocate 20 bytes for the temperature string */
+        pTempString = MEM_BufferAlloc(20);
+        if(NULL == pTempString)
+        {
+        	/* If it fails allocating the buffer for temperature, then send a hardcoded 0*/
+        	pTempString = (uint8_t*)"0";
+        	setTemperature = 0;
+        }
+        else {
+        	sprintf((char*)pTempString, "%d", (int)setTemperature);
+        }
         ackPloadSize = strlen((char*)pTempString);
     }
     /* Do not parse the message if it is duplicated */
@@ -1307,9 +1338,10 @@ static void APP_CoapTempCb
         {
             char addrStr[INET6_ADDRSTRLEN];
             uint8_t temp[10];
+            char *ptr;
 
             ntop(AF_INET6, &pSession->remoteAddr, addrStr, INET6_ADDRSTRLEN);
-            shell_write("\r");
+            shell_write("\rTarget temperature set to: ");
 
             if(0 != dataLen)
             {
@@ -1321,6 +1353,21 @@ static void APP_CoapTempCb
             }
             shell_printf("\tFrom IPv6 Address: %s\n\r", addrStr);
             shell_refresh();
+            /* Get the target temperature from the received data */
+            setTemperature = strtol((const char*)temp, &ptr, 10);
+
+            if(setTemperature == 0) {
+            	/* Stop the temperature sampling timer */
+            	TMR_StopTimer(tmrGetTemp);
+            	shell_printf("\t *** Heater Off ***\n\r", addrStr);
+            }
+            else {
+            	/* Start the temperature sampling timer */
+                if(tmrGetTemp != gTmrInvalidTimerID_c)
+                {
+                    TMR_StartIntervalTimer(tmrGetTemp, 500, APP_GetTempCb, NULL);
+                }
+            }
         }
     }
 
@@ -1489,6 +1536,137 @@ static void APP_AutoStartCb
     NWKU_SendMsg(APP_AutoStart, NULL, mpAppThreadMsgQueue);
 }
 #endif
+
+/*!*************************************************************************************************
+\private
+\fn     static void APP_GetTempCb(void)
+\brief  This is the GET temperature callback function.
+
+\param  [in]    param    Not used
+***************************************************************************************************/
+static void APP_GetTempCb
+(
+    void *param
+)
+{
+	/*This function is called in the timer's interrupt context so lets ask the NWKU_SendMsg function
+	 * to call APP_SendGetTemp in the app task's context.
+	 * */
+    NWKU_SendMsg(APP_SendGetTemp, NULL, mpAppThreadMsgQueue);
+}
+
+/*!*************************************************************************************************
+\private
+\fn     static void APP_SendGetTemp(uint8_t *pCommand, uint8_t dataLen)
+\brief  This function is used to send a GET command primitive to gCoapDestAddress to read the current
+\brief  temperature.
+
+\param  [in]    param    Not used
+***************************************************************************************************/
+static void APP_SendGetTemp
+(
+	    void *param
+)
+{
+	char addrStr[INET6_ADDRSTRLEN];
+
+    if(IP6_IsMulticastAddr(&gCoapDestAddress))
+    {
+    	/* The destination address has not been set
+    	 * use the shell's setdest command to set the ULA address of the Temp sensor device as
+    	 * destination address */
+    	shell_printf("\n\r\t** Unicast Destination address has not been set!!");
+    	return;
+    }
+	/* Create a Coap session to send this message and get its response */
+	coapSession_t *pSession = COAP_OpenSession(mAppCoapInstId);
+
+	if(pSession)
+	{
+		ntop(AF_INET6, &gCoapDestAddress, addrStr, INET6_ADDRSTRLEN);
+		shell_printf("\n\r\tSend COAP GET /temp to: %s", addrStr);
+		/* It is a GET message */
+		coapMsgTypesAndCodes_t coapMessageType = gCoapMsgTypeConGet_c;
+		/* Set the callback that will be called when the response is ready*/
+		pSession->pCallback = APP_SendGetTempCallback;
+		/* Set the destination IP address */
+		FLib_MemCpy(&pSession->remoteAddr, &gCoapDestAddress, sizeof(ipAddr_t));
+		/* Set the URI of the property we are GETting */
+		COAP_SetUriPath(pSession,(coapUriPath_t *)&gAPP_TEMP_URI_PATH);
+		/* Send the message */
+		COAP_Send(pSession, coapMessageType, NULL, 0);
+	}
+}
+
+/*!*************************************************************************************************
+\private
+\fn     static void APP_SendGetTempCallback(coapSessionStatus_t sessionStatus, void *pData,
+                                            coapSession_t *pSession, uint32_t dataLen)
+\brief  This function is the callback function for GET temp CoAP message.
+
+\param  [in]    sessionStatus   Status for CoAP session
+\param  [in]    pData           Pointer to CoAP message payload
+\param  [in]    pSession        Pointer to CoAP session
+\param  [in]    dataLen         Length of CoAP payload
+***************************************************************************************************/
+static void APP_SendGetTempCallback
+(
+    coapSessionStatus_t sessionStatus,
+    void *pData,
+    coapSession_t *pSession,
+    uint32_t dataLen
+)
+{
+    /* If no ACK was received, try again */
+    if(sessionStatus == gCoapFailure_c)
+    {
+        if(FLib_MemCmp(pSession->pUriPath->pUriPath, (coapUriPath_t*)&gAPP_TEMP_URI_PATH.pUriPath,
+                       pSession->pUriPath->length))
+        {
+            (void)NWKU_SendMsg(APP_SendGetTemp, NULL, mpAppThreadMsgQueue);
+        }
+    }
+    else {
+    	/* Process data, if any */
+        if(NULL != pData)
+        {
+            char addrStr[INET6_ADDRSTRLEN];
+            uint8_t temp[20];
+            char *ptr;
+
+            ntop(AF_INET6, &pSession->remoteAddr, addrStr, INET6_ADDRSTRLEN);
+            shell_write("\rTemperature read: ");
+
+            if(0 != dataLen)
+            {
+                /* Prevent from buffer overload */
+                (dataLen >= 20) ? (dataLen = 19) : (dataLen);
+                temp[dataLen]='\0';
+                FLib_MemCpy(temp,pData,dataLen);
+                shell_printf((char*)temp);
+            }
+            shell_printf("\tFrom IPv6 Address: %s\n\r", addrStr);
+            shell_refresh();
+
+            /* Get the target temperature from the received data */
+            uint32_t temperature = strtol((const char*)temp, &ptr, 10);
+
+            if(temperature >= setTemperature) {
+            	if(heaterOn) {
+            		shell_printf("\t *** Heater Off ***\n\r", addrStr);
+            		heaterOn = FALSE;
+            	}
+            }
+            else {
+            	if(!heaterOn) {
+            		shell_printf("\t *** Heater On ***\n\r", addrStr);
+            		heaterOn = TRUE;
+            	}
+            }
+        }
+    }
+    COAP_CloseSession(pSession);
+}
 
 /*==================================================================================================
 Private debug functions

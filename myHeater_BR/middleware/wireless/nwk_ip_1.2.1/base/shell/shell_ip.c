@@ -110,6 +110,8 @@ extern moduleInfo_t IP_version;
 extern uint16_t mEchoUdpCounter;
 #endif
 
+extern ipAddr_t gCoapDestAddress;
+
 /*==================================================================================================
 Private macros
 ==================================================================================================*/
@@ -289,6 +291,9 @@ static void SHELL_MgmtPanIdConflictCbHandler(void *param);
 static void SHELL_MgmtSetCbHandler(void *param);
 static void SHELL_MgmtGetCbHandler(void *param);
 #endif
+
+static int8_t SHELL_Setdest(uint8_t argc, char *argv[]);
+
 /*==================================================================================================
 Private global variables declarations
 ==================================================================================================*/
@@ -315,7 +320,6 @@ static bool_t           mShellBoardIdentify = FALSE;
 /*==================================================================================================
 Public global variables declarations
 ==================================================================================================*/
-
 const cmd_tbl_t aShellCommands[] =
 {
     {
@@ -413,6 +417,17 @@ const cmd_tbl_t aShellCommands[] =
         "IP Stack ping IPv4/IPv6 addresses\r\n"
         "   ping <ip address> -I <interface> -i <timeout> -c <count> -s <size> -t <continuous ping> -S <source IP address>\r\n"
         "   Valid interfaces: 6LoWPAN, eth, serialtun, usbEnet\r\n"
+#endif /* SHELL_USE_HELP */
+#if SHELL_USE_AUTO_COMPLETE
+        ,NULL
+#endif /* SHELL_USE_AUTO_COMPLETE */
+    },
+    {
+        "setdest", SHELL_CMD_MAX_ARGS, 0, SHELL_Setdest
+#if SHELL_USE_HELP
+        ,"Sets the App Coap messages destination address.",
+        "IPv4/IPv6 addresses\r\n"
+        "   setdest <ip address>\r\n"
 #endif /* SHELL_USE_HELP */
 #if SHELL_USE_AUTO_COMPLETE
         ,NULL
@@ -5053,6 +5068,67 @@ static void float_division(char *intPart, char *fractPart, uint32_t sent, uint32
     }
 }
 #endif/* ICMP_STATISTICS_ENABLED */
+
+/*!*************************************************************************************************
+\private
+\fn     static int8_t  SHELL_Setdest(uint8_t argc, char *argv[])
+\brief
+
+\param  [in]    argc      Number of arguments the command was called with
+\param  [in]    argv      Pointer to a list of pointers to the arguments
+
+\return         int8_t    Status of the command
+***************************************************************************************************/
+static int8_t SHELL_Setdest
+(
+    uint8_t argc,
+    char *argv[]
+)
+{
+    command_ret_t ret = CMD_RET_SUCCESS;
+    uint8_t i, ap = AF_UNSPEC;
+    bool_t validDstIpAddr = FALSE;
+
+    /* Check if the destination IPv4/IPv6 address is valid */
+    for (i = 1; i < argc; i++)
+    {
+        /* Verify IP address (v4 or v6) */
+        uint8_t *pText = (uint8_t *)argv[i];
+
+        while (*pText != '\0')
+        {
+            if (*pText == '.')
+            {
+                ap = AF_INET;
+                break;
+            }
+            if (*pText == ':')
+            {
+                ap = AF_INET6;
+                break;
+            }
+            pText++;
+        }
+
+        if ((ap == AF_INET6) && (1 == pton(ap, argv[i], &gCoapDestAddress)))
+        {
+            validDstIpAddr = TRUE;
+            break;
+        }
+    }
+
+    if (!validDstIpAddr)
+    {
+        shell_write("Invalid destination IP address");
+        return CMD_RET_FAILURE;
+    }
+    else {
+        shell_write("A very good destination IP address!!");
+    }
+
+
+    return ret;
+}
 
 #endif /* THREAD_USE_SHELL */
 
